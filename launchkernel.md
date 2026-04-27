@@ -987,11 +987,5 @@ gckcommand_start(command)
 
 ​	退回到kernel_notify函数，读取event，设置pending，再通过gckevent_notify函数处理中断
 
-<img src="C:\Users\OT\AppData\Roaming\Typora\typora-user-images\image-20250925174044192.png" alt="image-20250925174044192" style="zoom:67%;" />
-
-
-
-
-
 
 
