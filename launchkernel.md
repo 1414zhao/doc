@@ -985,6 +985,14 @@ command->currcontext = null //触发context切换
 gckcommand_start(command)
 ```
 
+
+
+<img width="757" height="309" alt="image" src="https://github.com/user-attachments/assets/9c7156c8-3661-49d8-9163-1e4bae43c69c" />
+
+
+
+
+
 ​	退回到kernel_notify函数，读取event，设置pending，再通过gckevent_notify函数处理中断
 
 
