@@ -984,16 +984,21 @@ bytes=command->pagesize-offset
 command->currcontext = null //触发context切换
 gckcommand_start(command)
 ```
-
+	退回到kernel_notify函数，读取event，设置pending，再通过gckevent_notify函数处理中断
 
 
 <img width="757" height="309" alt="image" src="https://github.com/user-attachments/assets/9c7156c8-3661-49d8-9163-1e4bae43c69c" />
+<img width="770" height="267" alt="image" src="https://github.com/user-attachments/assets/3900ab50-3257-4de9-869a-2da6d60f7ca7" />
+<img width="768" height="312" alt="image" src="https://github.com/user-attachments/assets/19aee6c6-8707-48a7-98ff-76165664280d" />
+<img width="1238" height="573" alt="image" src="https://github.com/user-attachments/assets/77438118-f250-4d83-ad94-42c901d52312" />
+<img width="766" height="319" alt="image" src="https://github.com/user-attachments/assets/5f50bd57-97f9-4e80-8f0c-fdd57fd40d4c" />
+<img width="1245" height="399" alt="image" src="https://github.com/user-attachments/assets/90ad718c-5dcd-4680-ae3c-4e5180c86670" />
 
 
 
 
 
-​	退回到kernel_notify函数，读取event，设置pending，再通过gckevent_notify函数处理中断
+​
 
 
 
