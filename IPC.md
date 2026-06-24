@@ -8,9 +8,61 @@ RX_RING_BUFFER_SHARED_MEM 0x1D000200-0X1D000400（512B）
 
 ## ipc_commu_init
 
+### ipc_msg结构体
+
+传给bios的消息结构体，包括消息传递的source和target，要执行的command（event_id）等配置参数
+
+```c
+typedef struct ipc_msg_hdr {
+	u64 event_type : 4;
+	u64 source : 4;    //消息源host
+	u64 target : 4;    //消息目的AON
+	u64 event_status : 2;
+	u64 event_id : 7;  //要执行的command
+	u64 event_pri : 2  //优先级
+	u64 msg_seq : 8;
+	u64 msg_sync : 1;  //是否同步传输
+	u64 msg_type : 1;
+	u64 need_reply : 1;    
+	u64 payload_size : 6; //dword size
+	u64 rsv : 24;
+} ipc_msg_hdr_t;
+```
+
+### version结构体
+
+上层需要的包含具体信息的结构体
+
+```c
+typedef struct ver_msg {
+	u32 status;
+	u32 rsv;
+	u64 bios_version; //bios_version
+	u64 bios_build_date;
+} ver_msg_t;
+```
+
+### rb_hdr结构体
+
+ringbuffer缓存区的消息头，包含读写指针，缓存区的size和缓存区中的数据基址（date基址，date中包括ipc_msg和ver_msg）             
+
+​                        buffer_ptr                                date
+
+|........rb_hdr_t.........|...........ipc_msg .............|..........................ver_msg.............................|                                                       
+
+```c
+typedef struct {
+	rb_index_t read_index;  //读指针
+	rb_index_t write_index; //写指针
+	u32 reserved;
+	u32 buffer_size;	   //缓存区size
+	u64 buffer_ptr;        //缓存区中date的基址,不用指针确保兼容64和32位
+} rb_hdr_t;
+```
+
 初始化ipc_commu，初始化锁、初始化等待队列、初始化tx和rx的rinfbuffer地址
 
-ringbuffer存在cls_mem中
+ringbuffer存在一块bios和host共享的内存cls_mem中
 
 ```c
 init_waitqueue_head(&g_ep->waitqueue) //初始化等待队列
@@ -22,23 +74,26 @@ g_ep->rx.real_queue =bar4+RX_RING_BUFFER_SHARED_MEM //rx ringbuffer地址
 
 host向bios提交请求
 
-配置ipc_msg_data参数，根据event_id调用commu_call_rpc函数向bios提交ipc_msg_data，返回数据到out_msg_data
+配置ipc_msg参数，根据event_id调用commu_call_rpc函数通过tx向bios提交ipc_msg_data，host通过rx读取bios返回的数据
 
 ```c
+ipc_msg_t *ipc_msg_data;
+ipc_msg_t *out_msg_data;
 ipc_msg_data=kzalloc(RING_BUFFER_TOTAL_SIZE,GEP_KERNEL) //512Byte
 out_msg_data=kzalloc(RING_BUFFER_TOTAL_SIZE,GEP_KERNEL)
-//配置ipc_msg_data参数
+//配置ipc_msg参数，通过tx传给bios的配置参数
 ipc_msg_data->hdr.event_type=event_type 
-ipc_msg_data->hdr.src=IPC_HOST
-ipc_msg_data->hdr.dst=IPC_CCD1_AON
+ipc_msg_data->hdr.source=IPC_HOST		//host作为source
+ipc_msg_data->hdr.target=IPC_CCD1_AON    //AON作为target
 ...
+ipc_msg_data->hdr.msg_seq=atomic_inc_return(&msg_id) //同步值，bios中会获取这个值传到rx中，host读取rx中seq与host的seq进行比较
 switch(event_id)    //根据event_type向bios提交请求，返回数据到out_msg_data
     ...
     case EVENT_TYPE_GET_VERSION:
 		//需要获得信息的个数（4字节数）
 	    ipc_msg_data->hdr.payload_size = sizeof(ver_msg_t) / sizeof(u32);
-	    //传进bios的参数size
-        enqueue_size=sizeof(ipc_msg_data->hdr);
+	    //传进bios的参数size （bios配置参数size + 需要的信息结构体size）
+        enqueue_size=sizeof(ipc_msg_hdr_t) + sizeof(ver_msg_t)：
         //调用commu_call_rpc函数将请求数据传给tx_rinfbuffer，从rx_ringbuffer读取bios处理后的信息
         commu_call_rpc(ep,ipc_msg_data,enqueue_size,out_msg_data,&out_size,timeout_jiffies)
 ```
@@ -94,31 +149,45 @@ if (rb_header.read_index.index == rb_header.write_index.index) {
 
 检测是否需要绕回
 
-不需要绕回，将数据传入ringbuffer+write_index处，更新ringbuffer的write_index
+不需要绕回，将数据传入ringbuffer+write_index处，ringbuffer的write_index累增
 
-需要绕回，将两段数据传入ringbuffer+write_index和ringbuffer起始处，更新ringbuffer的write_index
+需要绕回，将两段数据传入ringbuffer+write_index和ringbuffer起始处，在起始处重新更新ringbuffer的write_index
+
+​    left_space                                                           left_space
+
+|-------------------|----------------------------------------|---raw_left_space---|
+
+​                  read_index                           write_index
+
+|---------data_len - raw_left_space------|-------------------------------------|
+
+​						   write_index
 
 ```c
 //将ringbuffer中信息传到header中
 memcpy_fromio(header，queue->start_addr，sizeof(rb_hdr_t));
-//先通过buffer_size-write_index.index检测是否绕回
-left_space = header.buffer_size - header.write_index.index
-mirror = left_space > size ? false:true
+//到ringbuffer末尾的剩余size
+raw_left_space = header.buffer_size - header.write_index.index
+//raw_left_space大于data_len，未回绕，size小于data_len回绕
+mirror = raw_left_space > data_len ? false:true
+//缓存区剩余size
+left_space = header.buffer_size - rb_unconsumed_data_size(rb_header_old);
+if (left_space < data_len) {
+	return 0;
+}
 if(!mirror){
     //数据传到ringbuffer
-    memcpy_toio(queue->start_addr+sizeof(rb_hdr_t)+header.write_index.index,data,size)
-    //更新write_index
-    header.write_index.index += size;
-    //更新ringbuffer中的write_index
+    memcpy_toio(queue->start_addr+sizeof(rb_hdr_t)+header.write_index.index,data,data_len)
+    //更新write_index，write_index累加（write_index + data_len）
+    header.write_index.index += data_len;
 }else{
-    //绕回，数据分为两段
-    memcpy_toio(queue->start_addr+sizeof(rb_hdr_t)+header.write_index.index,data,left_space)
-    memcpy_toio(queue->start_addr+sizeof(rb_hdr_t),data+left_space,size-left_space)
-    //更新write_index
-    header.write_index.index = size-left_space;
+    //回绕，数据分为两段
+    memcpy_toio(queue->start_addr+sizeof(rb_hdr_t)+header.write_index.index,data,raw_left_space)
+    memcpy_toio(queue->start_addr+sizeof(rb_hdr_t),data+left_space,data_len-raw_left_space)
+    //起始处重新更新write_index，（data_len - raw_left_space）
+    header.write_index.index = data_len-raw_left_space;
     //更新write_mirror
     header.write_index.mirror = ~header.write_index.mirror
-    //更新ringbuffer中的write_index
 }
 ```
 
@@ -146,13 +215,12 @@ spin_unlock_irqrestore(&queue->lock, irqflags);
 
 ## rb_read_seq_only(glance)
 
-读取seq
-
-更新read_index?
+从rx中读取seq（这里的seq是tx传进的seq，bios会把这个seq传到rx）
 
 ```c
 //将ringbuffer中信息传到header中
 memcpy_fromio(header，queue->start_addr，sizeof(rb_hdr_t));
+size = sizeof(ipc_msg_hdr_t);
 //先通过buffer_size-write_index.index检测是否绕回
 left_space = header.buffer_size - header.write_index.index
 mirror = left_space > size ? false:true
@@ -161,9 +229,8 @@ if(!mirror){
     memcpy_fromio(&msg_header,queue->start_addr+sizeof(rb_hdr_t)+header.read_index.index,size);
 }else{
     //绕回，分为两段
-    memcpy_fromio(&msg_header,queue->start_addr+sizeof(rb_hdr_t)+header.read_index.index,left_space);
+    memcpy_fromio(&msg_header,queue>start_addr+sizeof(rb_hdr_t)+header.read_index.index,left_space);
     memcpy_fromio(&msg_header,queue->start_addr+sizeof(rb_hdr_t),size-left_space);
-    
 }
 //最后返回msg_seq
 return msg_header.msg_seq
@@ -192,30 +259,28 @@ return true
 
 不需要绕回，从ringbuffer+read_index处读取数据，更新ringbuffer的read_index
 
-需要绕回，从ringbuffer+read_index和ringbuffer起始处读取数据，更新ringbuffer的read_index
+需要绕回，从ringbuffer+read_index和ringbuffer起始处读取数据，在起始处重新更新ringbuffer的read_index
 
 ```c
 //将ringbuffer中信息传到header中
 memcpy_fromio(header，queue->start_addr，sizeof(rb_hdr_t));
-//先通过buffer_size-write_index.index检测是否绕回
-left_space = header.buffer_size - header.write_index.index
+//到ringbuffer末尾的剩余size
+raw_left_space = header.buffer_size - header.read_index.index
 //剩余size不足，需要回绕
-mirror = left_space > size ? false:true
+mirror = raw_left_space > data_len ? false:true
 if(!mirror)    
     //数据从ringbuffer传到buf
-    memcpy(data, (u8 *)rb->start_addr + sizeof(rb_hdr_t) + rb_header.read_index.index, size);
+    memcpy(data, (u8 *)rb->start_addr + sizeof(rb_hdr_t) + rb_header.read_index.index, data_len);
 	//更新read_index
-    rb_header.read_index.index += size;
-	//更新ringbuffer的read_index
+    rb_header.read_index.index += data_len;
 else
      //绕回，数据分为两段
     memcpy_toio(data, (u8 *)rb->start_addr + sizeof(rb_hdr_t) + rb_header.read_index.index, raw_left_space)
-    memcpy_toio(data + raw_left_space, (u8 *)rb->start_addr + sizeof(rb_hdr_t), size - raw_left_space)
-    //更新read_index
-    header.write_index.index = size-left_space;
+    memcpy_toio(data + raw_left_space, (u8 *)rb->start_addr + sizeof(rb_hdr_t), data_len - raw_left_space)
+    //起始处重新更新read_index
+    header.write_index.index = data_len-raw_left_space;
     //更新read_mirror
     header.write_index.mirror = ~header.write_index.mirror
-    //更新ringbuffer中的read_index
 ```
 
 ## rb_dequeue(dequeue)
@@ -229,9 +294,11 @@ spin_lock_irqsave(&q->lock, irqflags);
 memcpy_fromio(header，queue->start_addr，sizeof(rb_hdr_t));
 //读取消息头
 rb_read_data(rb, (u8 *)&msg, sizeof(ipc_msg_t));
+//copy ipc_msg_t到buf中
 memcpy(buf, &msg, sizeof(ipc_msg_t));
 //读取ringbuffer中data
 rb_read_data(rb, ipc_msg_data, msg.hdr.payload_size * sizeof(u32));
+//copy ver_msg到buf中
 memcpy(buf + sizeof(ipc_msg_t), ipc_msg_data, msg.hdr.payload_size * sizeof(u32));
 *size = sizeof(ipc_msg_t) + msg.hdr.payload_size * sizeof(u32);
 spin_unlock_irqrestore(&q->lock, irqflags);
@@ -247,17 +314,17 @@ spin_unlock_irqrestore(&q->lock, irqflags);
 
 将对应rx中的信息传到out，唤醒等待队列
 
-当bios中信息传输完成，bios会触发中断唤醒等待队列；当
+当bios中信息传输完成，bios会触发中断唤醒等待队列
 
 ```c
-//设置tx_ringbuffer的seq
+//设置tx_ringbuffer的seq，host侧的seq（初始值为0）
 seq = ep->tx.real_queue.seq++;
 //seq对齐到COMMU_CALL_RPC_SEQ_INUSED_BITS范围内
 seq_bit = seq & COMMU_CALL_RPC_SEQ_INUSED_BITS;
 //将rpc_flag的第seq_bit位设置为1（设置位图rpc_flag）
 set_bit(seq_bit, &ep->rpc_flag);
 
-//将ipc_msg_data传入tx_ringbuffer中
+//将ipc_msg传入tx_ringbuffer中
 ret = ep->tx.ops->enqueue(ep->tx.real_queue，ipc_msg_data，in_size + sizeof(ipc_msg_hdr_t));
 //剩余size不足，清除位图退出
 if (ret < 0) 
@@ -312,7 +379,12 @@ clear:
 
 根据tx_ringbuffer中的信息进行处理，处理后的数据放到rx_ringbuffer中
 
+bios侧会先对ring_buffer进行初始化，初始化rb_hdr结构体（主要初始化buffer_size和buffer_ptr）
+
 ```c
+buffer_size = 512 - sizeof(rb_hdr)
+buffer_ptr = date   //ring_buffer中date首地址
+...
 while (ep->tx.ops->query_new(ep->tx.real_queue))
     //从tx_ringbuffer中取出数据到inbuf
 	ep->tx.ops->dequeue_rpc(ep->tx.real_queue, inbuf, &in_size);
