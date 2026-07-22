@@ -472,14 +472,23 @@ _LockVideoMemory
 
 #### gckVIDMEM_HANDLE_Lookup
 
-​	获得当前processid对应的database，获得database中的handledatabase和handledatabasemutex，根据handle得到pos=handle-1，database->table[pos]作为handleObject，从handleobject获得对应的nodeObject
+​	获得当前processid对应的database，获得database中的handledatabase，根据handle得到pos=handle-1，database->table[pos]作为handleObject，从handleobject获得对应的nodeObject
 
 ```c
 gckVIDMEM_HANDLE_Lookup(Kernel, ProcessID,Handle, *Node)
     gckKERNEL_FindHandleDatabase(Kernel, ProcessID,&database, &mutex)
-    gckKERNEL_QueryIntegerId(database, Handle,(gctPOINTER *)&handleObject)
-    node = handleObject->node;
-	*Node = node;
+    pos =handle - 1
+    //pos除32作为位图的下标
+    n = pos >> 5;
+    //pos与32的余数作为位图的偏移
+    i = pos & 31;
+    //如果handle对应的位图状态为0（表示对应内存未占用）返回错误
+    if (pos >= handledatabase->capacity || (handledatabase->bitmap[n] & (1u << i)) == 0)
+        return null
+    //根据handle获得handleObject
+    handleObject = handledatabase->table[pos]
+    //获得nodeobject
+    nodeobject = handleObject->node
 ```
 
 #### gckVIDMEM_NODE_LockCPU
