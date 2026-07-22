@@ -175,7 +175,15 @@ database->nonPaged.bytes = 0;
 database->mapMemory.bytes = 0;
 ...
 //从task->comm获得，最大16个字符，name过长会被截断
-database->processName = 
+database->processName =
+//给当前kernel的database分配一个vm空间
+if (Kernel->processPageTable)
+    gckVM_VMConstruct(Kernel, ProcessID, (gckVM *)&database->vm)
+    gckVM_VASpaceAdd((gckVM)database->vm, Kernel, ProcessID, gcvNULL)
+//初始化database的list   
+for (i = 0; i < gcmCOUNTOF(database->list); i++)
+    database->list[i] = null
+
 for (i = 0; i < gcvVIDMEM_TYPE_COUNT; i++)
     database->vidMemType[i].bytes = 0
     ...
@@ -191,7 +199,20 @@ for (i = 0; i < gcdDEVICE_COUNT; i++)
 database->next = Kernel->db->db[slot];
 Kernel->db->db[slot] = database;    
 ```
+#### VASpaceAdd
 
+​	给database分配一个vm虚拟内存空间，每个细化的MP分配一个vaSpace，vaSpace作为database->vm的参数
+
+```c
+//配置vaSpace参数
+space->deviceID = deviceId;  //deviceid
+space->kernel = Kernel;      //kernel
+gckMMU_ConstructProcessMMU(Kernel, ProcessID, &space->mmu) //mmu
+space->vm = database->vm;       
+space->mmu->space = space;
+//每个kernel一个space
+database->vm->vaSpace[deviceId] = space;
+```
 #### FindDatabase	
 
 ​	寻找当前进程对应的database，并把它移到hash链表头
